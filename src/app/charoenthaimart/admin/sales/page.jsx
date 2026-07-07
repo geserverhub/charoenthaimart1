@@ -30,6 +30,13 @@ export default function CtmSales() {
   const [payType, setPayType] = useState("CASH");
   const [saleNote, setSaleNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [onlineOrders, setOnlineOrders] = useState([]);
+  const [orderSearch, setOrderSearch] = useState("");
+  const [usedOrderId, setUsedOrderId] = useState(null);
+  const [customers, setCustomers] = useState([]);
+  const [customerId, setCustomerId] = useState("");
+  const [custSearch, setCustSearch] = useState("");
+  const [showCustPicker, setShowCustPicker] = useState(false);
   const barcodeRef = useRef(null);
 
   const queryParam = tab === "day" ? `date=${day}` : tab === "month" ? `month=${month}` : `year=${year}`;
@@ -43,19 +50,55 @@ export default function CtmSales() {
 
   const openAdd = async () => {
     setCart([]); setPSearch(""); setBarcodeVal(""); setPayType("CASH"); setSaleNote(""); setNextInv("");
-    const [pr, pm, nc] = await Promise.all([
+    setOrderSearch(""); setUsedOrderId(null); setCustomerId(""); setCustSearch(""); setShowCustPicker(false);
+    const [pr, pm, nc, ord, cust] = await Promise.all([
       fetch("/api/ctm/products").then(r => r.json()),
       fetch("/api/ctm/promotions/public").then(r => r.json()),
       fetch("/api/ctm/sales/nextcode").then(r => r.json()).catch(() => ({})),
+      fetch("/api/ctm/orders").then(r => r.json()).catch(() => ({})),
+      fetch("/api/ctm/customers").then(r => r.json()).catch(() => ({})),
     ]);
     setNextInv(nc.code || "");
     setProducts((pr.products || []).filter(p => p.isActive));
     const promoMap = {};
     (pm.promotions || []).forEach(p => { promoMap[p.productId] = p; });
     setPromos(promoMap);
+    setOnlineOrders((ord.orders || []).filter(o => o.status === "PENDING"));
+    setCustomers(cust.customers || []);
     setShowAdd(true);
     setTimeout(() => barcodeRef.current?.focus(), 150);
   };
+
+  const useOnlineOrder = (order) => {
+    const items = (order.items || []).map(oi => {
+      const product = products.find(p => p.id === oi.id);
+      if (!product) return null;
+      return { productId: product.id, productName: product.name, quantity: oi.qty, unitPrice: Number(oi.price), buyPrice: Number(product.buyPrice), isPromo: false, origPrice: Number(product.sellPrice) };
+    }).filter(Boolean);
+    setCart(items);
+    setUsedOrderId(order.id);
+    setSaleNote(`ออนไลน์ ${order.orderNo} · ${order.recipientName} · ${order.recipientPhone}`);
+    setOrderSearch("");
+    const matchedCustomer = customers.find(c => c.phone && c.phone === order.recipientPhone);
+    if (matchedCustomer) setCustomerId(matchedCustomer.id);
+  };
+
+  const selectCustomer = (c) => {
+    setCustomerId(c.id);
+    setShowCustPicker(false);
+    setCustSearch("");
+  };
+
+  const filteredCustomers = custSearch
+    ? customers.filter(c => c.name.toLowerCase().includes(custSearch.toLowerCase()) || (c.phone || "").includes(custSearch))
+    : customers;
+
+  const filteredOrders = orderSearch
+    ? onlineOrders.filter(o =>
+        o.orderNo.toLowerCase().includes(orderSearch.toLowerCase()) ||
+        o.recipientName.toLowerCase().includes(orderSearch.toLowerCase()) ||
+        o.recipientPhone.includes(orderSearch))
+    : onlineOrders;
 
   const addToCart = (product) => {
     const promo = promos[product.id];
@@ -94,10 +137,14 @@ export default function CtmSales() {
     const res = await fetch("/api/ctm/sales", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: cart, paymentType: payType, note: saleNote || null }),
+      body: JSON.stringify({ items: cart, paymentType: payType, note: saleNote || null, customerId: customerId || null }),
     });
-    if (res.ok) { setShowAdd(false); load(); }
-    else { alert("บันทึกไม่สำเร็จ"); }
+    if (res.ok) {
+      if (usedOrderId) {
+        await fetch("/api/ctm/orders", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: usedOrderId, status: "CONFIRMED" }) }).catch(() => {});
+      }
+      setShowAdd(false); load();
+    } else { alert("บันทึกไม่สำเร็จ"); }
     setSaving(false);
   };
 
@@ -111,6 +158,15 @@ export default function CtmSales() {
 
   return (
     <div style={{ padding: "28px 32px" }}>
+      <style>{`
+        @media (max-width: 760px) {
+          .ctm-addsale-modal { max-width: 100% !important; height: 100vh !important; border-radius: 0 !important; }
+          .ctm-addsale-split { flex-direction: column !important; }
+          .ctm-addsale-left { border-right: none !important; border-bottom: 1px solid #e7e3d8; flex: 1 1 55% !important; }
+          .ctm-addsale-cart { width: 100% !important; flex: 1 1 45% !important; }
+          .ctm-addsale-overlay { padding: 0 !important; }
+        }
+      `}</style>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
         <h1 style={{ fontSize: 20, fontWeight: 800, color: "#92400e", margin: 0 }}>ยอดขาย</h1>
         <button onClick={openAdd} style={{ background: "#b45309", color: "#fff", border: "none", borderRadius: 8, padding: "9px 20px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ เพิ่มรายการขาย</button>
@@ -153,14 +209,14 @@ export default function CtmSales() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ background: "#fef3c7" }}>
-                {["","เลขที่บิล","วันที่","รายการ","ชำระเงิน","VAT","ยอดรวม"].map(h => (
+                {["","เลขที่บิล","วันที่","ลูกค้า","รายการ","ชำระเงิน","VAT","ยอดรวม"].map(h => (
                   <th key={h} style={{ padding: "10px 12px", textAlign: "left", fontWeight: 700, color: "#92400e" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {(!data?.sales || data.sales.length === 0) && (
-                <tr><td colSpan={7} style={{ padding: 20, textAlign: "center", color: "#9ca3af" }}>ไม่มีรายการขาย</td></tr>
+                <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "#9ca3af" }}>ไม่มีรายการขาย</td></tr>
               )}
               {data?.sales?.map((s, i) => (
                 <Fragment key={s.id}>
@@ -169,6 +225,14 @@ export default function CtmSales() {
                     <td style={{ padding: "8px 12px", color: "#9ca3af", fontSize: 11 }}>{expanded[s.id] ? "▼" : "▶"}</td>
                     <td style={{ padding: "8px 12px", fontFamily: "monospace", fontSize: 11, color: "#6b7280" }}>{s.number}</td>
                     <td style={{ padding: "8px 12px", color: "#374151" }}>{fmtDate(s.saleDate)}</td>
+                    <td style={{ padding: "8px 12px", color: "#374151" }}>
+                      {s.customer ? (
+                        <>
+                          <div style={{ fontWeight: 600 }}>{s.customer.name}</div>
+                          {s.customer.phone && <div style={{ fontSize: 11, color: "#9ca3af" }}>{s.customer.phone}</div>}
+                        </>
+                      ) : <span style={{ color: "#d1d5db" }}>—</span>}
+                    </td>
                     <td style={{ padding: "8px 12px", color: "#6b7280" }}>{s.items?.length || 0} รายการ</td>
                     <td style={{ padding: "8px 12px" }}>
                       <span style={{ background: s.paymentType === "CASH" ? "#dcfce7" : s.paymentType === "TRANSFER" ? "#dbeafe" : "#fef3c7", color: s.paymentType === "CASH" ? "#166534" : s.paymentType === "TRANSFER" ? "#1d4ed8" : "#b45309", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 700 }}>{s.paymentType}</span>
@@ -178,7 +242,10 @@ export default function CtmSales() {
                   </tr>
                   {expanded[s.id] && (
                     <tr style={{ background: "#fafaf7" }}>
-                      <td colSpan={7} style={{ padding: "0 12px 12px 40px" }}>
+                      <td colSpan={8} style={{ padding: "0 12px 12px 40px" }}>
+                        {s.customer?.address && (
+                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>📍 ที่อยู่: {s.customer.address}</div>
+                        )}
                         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                           <thead>
                             <tr style={{ color: "#9ca3af" }}>
@@ -211,8 +278,8 @@ export default function CtmSales() {
 
       {/* Add Sale Overlay */}
       {showAdd && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-          <div style={{ background: "#fff", width: "100%", maxWidth: 1100, borderRadius: 16, display: "flex", height: "92vh", overflow: "hidden", flexDirection: "column", boxShadow: "0 24px 64px rgba(0,0,0,.25)" }}>
+        <div className="ctm-addsale-overlay" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div className="ctm-addsale-modal" style={{ background: "#fff", width: "100%", maxWidth: 1100, borderRadius: 16, display: "flex", height: "92vh", overflow: "hidden", flexDirection: "column", boxShadow: "0 24px 64px rgba(0,0,0,.25)" }}>
             {/* Header */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: "1px solid #e7e3d8", background: "#fef3c7", flexShrink: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -227,9 +294,36 @@ export default function CtmSales() {
               <button onClick={() => setShowAdd(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 22, color: "#9ca3af", lineHeight: 1 }}>✕</button>
             </div>
 
-            <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+            <div className="ctm-addsale-split" style={{ display: "flex", flex: 1, overflow: "hidden" }}>
               {/* Left: product picker */}
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", borderRight: "1px solid #e7e3d8", overflow: "hidden" }}>
+              <div className="ctm-addsale-left" style={{ flex: 1, display: "flex", flexDirection: "column", borderRight: "1px solid #e7e3d8", overflow: "hidden" }}>
+                {/* Online orders picker */}
+                <div style={{ padding: "10px 16px", borderBottom: "1px solid #f3f4f6", background: "#fef2f2", flexShrink: 0 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#b91c1c", marginBottom: 4 }}>🛍️ ดึงจากคำสั่งซื้อออนไลน์ที่รอดำเนินการ ({onlineOrders.length})</div>
+                  <input value={orderSearch} onChange={e => setOrderSearch(e.target.value)}
+                    placeholder="ค้นหาเลขที่คำสั่งซื้อ / ชื่อ / เบอร์โทร..."
+                    style={{ width: "100%", border: "1px solid #fca5a5", borderRadius: 8, padding: "7px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                  {orderSearch && (
+                    <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: "1px solid #fca5a5", borderRadius: 8, background: "#fff" }}>
+                      {filteredOrders.length === 0 && <div style={{ padding: 10, textAlign: "center", color: "#9ca3af", fontSize: 12 }}>ไม่พบคำสั่งซื้อ</div>}
+                      {filteredOrders.map(o => (
+                        <div key={o.id} onClick={() => useOnlineOrder(o)}
+                          style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", borderBottom: "1px solid #f3f4f6", cursor: "pointer" }}
+                          onMouseEnter={e => e.currentTarget.style.background = "#fef2f2"}
+                          onMouseLeave={e => e.currentTarget.style.background = "#fff"}>
+                          <div>
+                            <div style={{ fontFamily: "monospace", fontWeight: 700, color: "#b91c1c", fontSize: 12 }}>{o.orderNo}</div>
+                            <div style={{ fontSize: 11, color: "#6b7280" }}>{o.recipientName} · {o.recipientPhone} · {o.items?.length || 0} รายการ</div>
+                          </div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#b45309" }}>₩{fmt(o.totalAmount)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {usedOrderId && (
+                    <div style={{ marginTop: 6, fontSize: 11, color: "#166534", fontWeight: 700 }}>✓ ใช้ข้อมูลจากคำสั่งซื้อออนไลน์แล้ว</div>
+                  )}
+                </div>
                 {/* Barcode input */}
                 <div style={{ padding: "10px 16px", borderBottom: "1px solid #f3f4f6", background: "#f9fafb", flexShrink: 0 }}>
                   <div style={{ fontSize: 11, fontWeight: 700, color: "#374151", marginBottom: 4 }}>🔍 สแกนบาร์โค้ด (กด Enter เพื่อเพิ่ม)</div>
@@ -271,7 +365,7 @@ export default function CtmSales() {
               </div>
 
               {/* Right: cart + checkout */}
-              <div style={{ width: 300, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div className="ctm-addsale-cart" style={{ width: 300, display: "flex", flexDirection: "column", overflow: "hidden" }}>
                 {/* Cart items */}
                 <div style={{ flex: 1, overflow: "auto", padding: "12px 14px" }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 10 }}>รายการในบิล ({cart.length} รายการ)</div>
@@ -309,6 +403,36 @@ export default function CtmSales() {
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, color: "#b45309", borderTop: "1px solid #fcd34d", paddingTop: 8, marginBottom: 12 }}>
                     <span>ยอดรวม</span><span>₩{fmt(total.toFixed(0))}</span>
+                  </div>
+
+                  <div style={{ marginBottom: 8, position: "relative" }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "#374151", marginBottom: 4 }}>ลูกค้า (ถ้ามี)</div>
+                    {customerId ? (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fef9c3", border: "1px solid #fcd34d", borderRadius: 6, padding: "6px 10px" }}>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#92400e" }}>{customers.find(c => c.id === customerId)?.name}</span>
+                        <button type="button" onClick={() => setCustomerId("")} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 14 }}>×</button>
+                      </div>
+                    ) : (
+                      <input value={custSearch}
+                        onChange={e => { setCustSearch(e.target.value); setShowCustPicker(true); }}
+                        onFocus={() => setShowCustPicker(true)}
+                        placeholder="ค้นหาชื่อลูกค้าหรือเบอร์โทร..."
+                        style={{ width: "100%", border: "1px solid #e7e3d8", borderRadius: 6, padding: "6px 10px", fontSize: 12, boxSizing: "border-box", outline: "none" }} />
+                    )}
+                    {showCustPicker && !customerId && (
+                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 10, background: "#fff", border: "1px solid #e7e3d8", borderRadius: 8, marginTop: 4, maxHeight: 180, overflowY: "auto", boxShadow: "0 4px 16px rgba(0,0,0,.08)" }}>
+                        {filteredCustomers.length === 0 && <div style={{ padding: 10, textAlign: "center", color: "#9ca3af", fontSize: 12 }}>ไม่พบลูกค้า</div>}
+                        {filteredCustomers.map(c => (
+                          <div key={c.id} onClick={() => selectCustomer(c)}
+                            style={{ padding: "7px 10px", borderBottom: "1px solid #f3f4f6", cursor: "pointer", fontSize: 12 }}
+                            onMouseEnter={e => e.currentTarget.style.background = "#fef3c7"}
+                            onMouseLeave={e => e.currentTarget.style.background = "#fff"}>
+                            <span style={{ fontWeight: 700, color: "#1f2937" }}>{c.name}</span>
+                            <span style={{ color: "#9ca3af", marginLeft: 6 }}>{c.phone || "—"}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div style={{ marginBottom: 8 }}>
